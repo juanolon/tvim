@@ -1,0 +1,222 @@
+#!/bin/bash
+
+#------------------------------------------------------------------------------
+# tmux-vim
+#
+# Persistent vim window within tmux.
+#
+# Usage:
+#
+#   create/open new vim pane named `target`
+#   tvim -n [target] [file [files...]]
+#   tvim -h open in horizontal split
+#   tvim -v open in vertical split
+#   tvim -t open in a new tab
+#
+# highly inspired on tmux-vim
+# https://github.com/sdt/tmux-vim
+
+tmux=${TMUX_VIM_TMUX_BIN:-tmux}
+vim=${VIM_BIN:-vim}
+OPTIND=1
+
+_die() {
+    echo "$@" 1>&2
+    exit 1
+}
+
+# _tmux_fetch_or_store key [value]
+# - appends window id to key so this is a per-window setting
+# - if value supplied, stores key=value, otherwise retrieves it
+# - many thanks to Romain Francoise for help with this!
+_tmux_fetch_or_store() {
+    local key="tvim_${1}"
+    if [[ $# -gt 1 ]]; then
+        $tmux set-environment $key "$2"
+    else
+        $tmux show-environment | grep "^$key=" | cut -d= -f2-
+    fi
+}
+
+# _munge_filename <string>
+# - workaround for missing -l flag to tmux send-keys in v1.5
+# - converts filename to f i l e n a m e (so that files that look like tmux key
+#   names are not interpreted as key codes)
+# - spaces in the filename are converted to "\ space"
+_munge_filename() {
+    # Note that we double-escape the backslashes, once for sed, again for
+    # passing it out to tmux.
+    echo $@ | sed -e 's/./& /g' | sed -e "s/  / \\\\ space/g"
+}
+
+tmux_running() {
+    # Check that tmux is actually running
+    if [[ -z "$TMUX" ]]; then
+        _die tmux session not detected
+    fi
+}
+# if opening vim for the first time, then open all the files directly
+# this way it is not necessary to wait for vim to start and start sending commands..
+register_vim() {
+    local sessionname=$1
+    local action=$2
+    local files=${@:3}
+
+    if already_open $sessionname; then
+        $tmux select-window -t $( window_id $sessionname )
+        return 1;
+    fi
+
+    # TODO add action
+    local vim_pane_id=$( $tmux new-window -P -n $sessionname -F '#{session_name}:#{window_index}.#{pane_index}$#{pane_id}' \
+                            "exec $vim $action $files" )
+    _tmux_fetch_or_store $sessionname $vim_pane_id
+    _tmux_fetch_or_store ${sessionname}_'last_dir' "$PWD"
+    return 0
+}
+
+already_open() {
+    local vim_location=$( vim_location $1 )
+    [[ -n $vim_location ]] && $tmux lsp -sF '#{session_name}:#{window_index}.#{pane_index}$#{pane_id}' | grep -q ^$vim_location$
+}
+
+# $1 tvim session name
+# returns #{session_name}:#{window_index}.#{pane_index}$#{pane_id}
+vim_location() {
+    echo $( _tmux_fetch_or_store $1 )
+}
+
+# returns #{session_name}:#{window_index}.#{pane_index}
+pane_id() {
+    local vim_location_id=$( vim_location $1 )
+    echo ${vim_location_id%\$*}
+}
+
+# returns #{pane_id}
+window_id() {
+    local vim_location_id=$( vim_location $1 )
+    echo "${vim_location_id#*\$}"
+}
+
+# $1 session name
+exec_vim_c() {
+    local sessionname=$1
+    shift
+
+    $tmux send-keys -t $( pane_id $sessionname ) "$@"
+    return 0
+}
+
+show_help() {
+    echo "@TODO :P"
+}
+
+register_session() {
+    _tmux_fetch_or_store 'last_session' $1
+}
+
+get_last_session() {
+    echo "$( _tmux_fetch_or_store 'last_session' )"
+}
+
+# source http://stackoverflow.com/questions/2564634/bash-convert-absolute-path-into-relative-path-given-a-current-directory
+get_path() {
+    # both $1 and $2 are absolute paths beginning with /
+    # returns relative path to $2/$target from $1/$source
+
+    type greadlink >/dev/null 2>&1 || _die "I require greadlink but it's not installed.  Aborting."
+
+    local source=$( greadlink -f $1 )
+    local target=$( greadlink -f $2 )
+
+    local common_part=$source # for now
+    local result="" # for now
+
+    while [[ "${target#$common_part}" == "${target}" ]]; do
+        # no match, means that candidate common part is not correct
+        # go up one level (reduce common part)
+        common_part="$(dirname $common_part)"
+        # and record that we went back, with correct / handling
+        if [[ -z $result ]]; then
+            result=".."
+        else
+            result="../$result"
+        fi
+    done
+
+    if [[ $common_part == "/" ]]; then
+        # special case for root (no common path)
+        result="$result/"
+    fi
+
+    # since we now have identified the common part,
+    # compute the non-common part
+    forward_part="${target#$common_part}"
+
+    # and now stick all parts together
+    if [[ -n $result ]] && [[ -n $forward_part ]]; then
+        result="$result$forward_part"
+    elif [[ -n $forward_part ]]; then
+        # extra slash removal
+        result="${forward_part:1}"
+    fi
+
+    echo $result
+}
+
+tvim() {
+    tmux_running || exit 1
+
+    local sessionname=$1
+    local action=$2
+    local files=(${@:3})
+
+    register_session $sessionname
+
+    if ( ! register_vim $sessionname $action $files ) && [[ $# -gt 0 ]]; then
+        # vim is ready to get commands
+        # TODO send escape only if vim not yet started
+        exec_vim_c $sessionname escape
+        # open files
+
+        # no change vim pwd, but prefix all files with the current path if necessary
+        local last_dir="$( _tmux_fetch_or_store "${sessionname}_last_dir")"
+        [[ "$PWD" != "$last_dir" ]] && last_dir="$PWD"
+
+        while [[ ${#files[@]} -gt 1 ]]; do
+            exec_vim_c $sessionname :badd space $( _munge_filename $( get_path "$last_dir" "$files" ) ) enter
+            files=("${files[@]:1}")
+        done
+
+        # TODO change action only here
+        exec_vim_c $sessionname :edit space $( _munge_filename $( get_path "$last_dir" "$files" ) ) enter
+    fi
+
+    $tmux select-pane -t $( pane_id $sessionname )
+}
+
+last_session=$( get_last_session )
+sessionname=${last_session:-vim}
+action=""
+
+while getopts ":s:t:v:h:" opt; do
+    case $opt in
+        s)  sessionname=${OPTARG}
+        ;;
+        t)  action="-p"
+        ;;
+        v)  action="-O"
+        ;;
+        h)  action="-o"
+        ;;
+        *)
+            show_help
+            exit 0
+            ;;
+    esac
+done
+
+# left the rest of parameters on $@
+shift $((OPTIND-1))
+
+tvim "$sessionname" "$action" "$@"
