@@ -17,7 +17,7 @@
 # https://github.com/sdt/tmux-vim
 
 tmux=${TMUX_VIM_TMUX_BIN:-tmux}
-vim=${VIM_BIN:-vim}
+vim=${VIM_BIN:-nvim}
 OPTIND=1
 
 _die() {
@@ -124,10 +124,10 @@ get_path() {
     # both $1 and $2 are absolute paths beginning with /
     # returns relative path to $2/$target from $1/$source
 
-    type greadlink >/dev/null 2>&1 || _die "I require greadlink but it's not installed.  Aborting."
+    type readlink >/dev/null 2>&1 || _die "I require readlink but it's not installed.  Aborting."
 
-    local source=$( greadlink -f $1 )
-    local target=$( greadlink -f $2 )
+    local source=$( readlink -f $1 )
+    local target=$( readlink -f $2 )
 
     local common_part=$source # for now
     local result="" # for now
